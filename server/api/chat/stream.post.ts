@@ -3,18 +3,17 @@ import { buildStreamPayload } from '~/server/utils/coze';
 // 流式对话代理：把浏览器请求转给 Coze /stream_run，原样回传 SSE
 export default defineEventHandler(async (event) => {
   const body = await readBody(event);
-  if (!body?.text) {
-    throw createError({ statusCode: 400, message: 'text required' });
+  if (!body?.items?.length) {
+    throw createError({ statusCode: 400, message: 'items required' });
   }
 
   const config = useRuntimeConfig(event);
   const url = `${config.cozeBase.replace(/\/$/, '')}/stream_run`;
   const payload = buildStreamPayload({
-    text: body.text,
+    items: body.items,
     conversationId: body.conversation_id,
     sessionId: body.session_id,
     projectId: config.cozeProjectId,
-    attachments: body.attachments || [],
   });
 
   // [debug] 转发给 Coze /stream_run 的实际负载（含是否带上了会话 ID）

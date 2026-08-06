@@ -1,6 +1,8 @@
 // 全局聊天状态（Nuxt useState 做 SSR 安全的单例）
 // 仅做「实时对话 + 流式渲染」，不做任何会话记录/历史持久化。
 
+import type { PromptItem } from '~/server/utils/coze';
+
 // 官方 Coze Web SDK / iframe 的做法：conversation_id 与 session_id 都是
 // 由客户端（SDK/iframe）自己生成的，每次请求带上去；服务端接受并使用。
 // 这里我们也客户端生成：
@@ -9,12 +11,7 @@
 export interface Msg {
   role: 'user' | 'assistant';
   text: string;
-}
-
-export interface ChatAttachment {
-  file_url: string;
-  filename: string;
-  type: string;   // 'image' | 'file' | 'video'
+  attachments?: PromptItem[];   // 用户消息可带附件（图片/文件），按 DOM 顺序
 }
 
 /**
@@ -63,13 +60,14 @@ export function useChat() {
     conversationId.value = genId();
   }
 
-  async function send(text: string, attachments: ChatAttachment[] = []) {
-    if (streaming.value || (!text.trim() && !attachments.length)) return;
+  async function send(items: PromptItem[]) {
+    if (streaming.value || !items.length) return;
     // 首次发送时确保两个 ID 都已生成（客户端生成，符合官方 iframe 行为）
     if (!sessionId.value) sessionId.value = genId();
     if (!conversationId.value) conversationId.value = genId();
 
-    messages.value = [...messages.value, { role: 'user', text }];
+    const text = items.filter((i) => i.kind === 'text').map((i) => (i as any).text).join('\n');
+    messages.value = [...messages.value, { role: 'user', text, attachments: items.filter((i) => i.kind !== 'text') }];
     streaming.value = true;
 
     // 不再预插空 assistant 消息；等首个 delta 到达时再创建，避免"空气泡+打字指示器"双占位
@@ -91,6 +89,7 @@ export function useChat() {
     // [debug] 发送前：当前带出的会话 ID（现在都应非 null）
     console.log('[useChat] ▶ send() 发起', {
       text: text.slice(0, 24),
+      itemCount: items.length,
       request_conversation_id: conversationId.value,
       request_session_id: sessionId.value,
     });
@@ -100,10 +99,9 @@ export function useChat() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text,
+          items,
           conversation_id: conversationId.value,
           session_id: sessionId.value,
-          attachments,
         }),
       });
       if (!res.ok || !res.body) {

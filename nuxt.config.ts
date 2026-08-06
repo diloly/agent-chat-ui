@@ -1,4 +1,6 @@
 export default defineNuxtConfig({
+  // 锁定 Nitro 兼容性日期，避免升级后行为漂移（消除启动 warning）
+  compatibilityDate: '2026-07-30',
   // 纯前端 SPA，聊天交互全在客户端
   ssr: false,
   devtools: { enabled: false },
