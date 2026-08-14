@@ -68,11 +68,13 @@
                 <span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
               </div>
 
-              <!-- 助手文本气泡：图片链接解析为内联缩略图，点击放大；加载失败自动重试，仍失败则降级为可点击链接 -->
+              <!-- 助手文本气泡：图片/视频/压缩包链接解析为内联元素，加载失败降级为可点击链接 -->
               <div v-if="m.text" class="bubble assistant">
                 <template v-for="(seg, si) in parseContent(m.text, streaming && i === messages.length - 1)" :key="si">
                   <span v-if="seg.type === 'text'" v-html="seg.html"></span>
-                  <template v-else>
+
+                  <!-- 图片 -->
+                  <template v-else-if="seg.type === 'image'">
                     <a
                       v-if="imgBrokenMap[seg.url]"
                       :href="seg.url"
@@ -92,6 +94,38 @@
                       loading="lazy"
                       decoding="async"
                     />
+                  </template>
+
+                  <!-- 视频（mp4 等直链，内联播放，preload=metadata 不预载整段） -->
+                  <template v-else-if="seg.type === 'video'">
+                    <video
+                      v-if="!videoBrokenMap[seg.url]"
+                      :key="seg.url"
+                      :src="seg.url"
+                      class="msg-video"
+                      controls
+                      preload="metadata"
+                      @error="onVideoError(seg.url)"
+                    ></video>
+                    <a
+                      v-else
+                      :href="seg.url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="md-link img-broken-link"
+                    >[视频加载失败 · 点击查看] {{ shortUrl(seg.url) }}</a>
+                  </template>
+
+                  <!-- 压缩包 / 文件卡片 -->
+                  <template v-else-if="seg.type === 'file'">
+                    <div class="file-card" :class="fileKindClass(seg.url)">
+                      <span class="file-icon">🗜️</span>
+                      <div class="file-meta">
+                        <div class="file-name">{{ fileBaseName(seg.url) }}</div>
+                        <div class="file-type">{{ fileExtLabel(seg.url) }}</div>
+                      </div>
+                      <a :href="seg.url" target="_blank" rel="noopener noreferrer" class="file-download" :download="fileBaseName(seg.url)">下载</a>
+                    </div>
                   </template>
                 </template>
               </div>
@@ -455,42 +489,58 @@ function renderMarkdown(src: string): string {
   return html;
 }
 
-// 把助手文本拆成「文字段」和「图片段」，图片链接内联为缩略图。
-// 兼容三种写法：裸 URL、`[文字](url)`、以及 `![](url)`。
-type Seg = { type: 'text'; html: string } | { type: 'image'; url: string };
-const IMG_TOKEN =
-  /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|\[([^\]]+)\]\((https?:\/\/[^\s)]+\.(?:png|jpe?g|gif|webp)[^\s)]*)\)|(https?:\/\/[^\s)]+\.(?:png|jpe?g|gif|webp)[^\s)]*)/gi;
+// 把助手文本拆成「文字段」和「媒体段」，链接内联为缩略图 / 视频 / 文件卡片。
+// 兼容三种写法：裸 URL、`[文字](url)`、以及 `![](url)`，并按扩展名区分图片/视频/压缩包。
+type Seg =
+  | { type: 'text'; html: string }
+  | { type: 'image'; url: string }
+  | { type: 'video'; url: string }
+  | { type: 'file'; url: string };
 
-// 图片完整性判定（核心、唯一标准）：URL 后面是否跟了「分隔符」。
-// - 非流式：文本已全部到达，直接渲染图片。
-// - 流式且 URL 后还有字符（空格/换行/括号/标点等）：说明该 URL 已结束（sign 等参数已拼完），渲染图片。
-// - 流式且 URL 位于文本末尾（后面无字符）：sign 可能仍在逐字到达，先渲染成可点击链接，拼完后再变缩略图。
+const MEDIA_TOKEN =
+  /!\[([^\]]*)\]\((https?:\/\/[^\s)]+\.(?:png|jpe?g|gif|webp|mp4|webm|mov|m4v|ogg|zip|rar|7z|tar\.gz|tgz|tar|gz)[^\s)]*)\)|\[([^\]]+)\]\((https?:\/\/[^\s)]+\.(?:png|jpe?g|gif|webp|mp4|webm|mov|m4v|ogg|zip|rar|7z|tar\.gz|tgz|tar|gz)[^\s)]*)\)|(https?:\/\/[^\s)]+\.(?:png|jpe?g|gif|webp|mp4|webm|mov|m4v|ogg|zip|rar|7z|tar\.gz|tgz|tar|gz)[^\s)]*)/gi;
+
+// 按扩展名判定媒体类型（只拦截图片/视频/压缩包，普通链接留给 Markdown 渲染）。
+function classifyMedia(url: string): 'image' | 'video' | 'file' | null {
+  const u = url.split('?')[0].split('#')[0].toLowerCase();
+  if (/\.(?:png|jpe?g|gif|webp)$/.test(u)) return 'image';
+  if (/\.(?:mp4|webm|mov|m4v|ogg)$/.test(u)) return 'video';
+  if (/\.(?:zip|rar|7z|tar\.gz|tgz|tar|gz)$/.test(u)) return 'file';
+  return null;
+}
+
+// 完整性判定（核心、唯一标准）：URL 后面是否跟了「分隔符」。
+// - 非流式：文本已全部到达，直接渲染对应媒体。
+// - 流式且 URL 后还有字符（空格/换行/括号/标点等）：说明该 URL 已结束（sign 等参数已拼完），渲染媒体。
+// - 流式且 URL 位于文本末尾（后面无字符）：sign 可能仍在逐字到达，先渲染成可点击链接，拼完后再变内联元素。
 function parseContent(text: string, streaming = false): Seg[] {
   if (!text) return [];
   const segs: Seg[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
-  IMG_TOKEN.lastIndex = 0;
+  MEDIA_TOKEN.lastIndex = 0;
 
-  while ((m = IMG_TOKEN.exec(text))) {
+  while ((m = MEDIA_TOKEN.exec(text))) {
     if (m.index > last) {
       segs.push({ type: 'text', html: renderMarkdown(text.slice(last, m.index)) });
     }
     const url = m[2] || m[4] || m[5];
-    if (url) {
+    const label = m[1] !== undefined ? m[1] : m[3] !== undefined ? m[3] : '';
+    const kind = classifyMedia(url || '');
+    if (url && kind) {
       const after = m.index + m[0].length;
       const complete = !streaming || after < text.length; // 有分隔符 = 完整
       if (complete) {
-        segs.push({ type: 'image', url });
+        segs.push({ type: kind, url });
       } else {
-        const linkText = m[1] || m[3] || url;
+        const linkText = label || url;
         segs.push({
           type: 'text',
           html: `<a href="${url}" target="_blank" rel="noopener noreferrer" class="md-link">${escapeHtml(linkText)}</a>`,
         });
       }
     }
-    last = IMG_TOKEN.lastIndex;
+    last = MEDIA_TOKEN.lastIndex;
   }
   if (last < text.length) {
     segs.push({ type: 'text', html: renderMarkdown(text.slice(last)) });
@@ -521,6 +571,12 @@ function onImgError(u: string) {
   imgBrokenMap.value = { ...imgBrokenMap.value, [u]: true };
 }
 
+// 视频加载失败：同样降级为可点击链接
+const videoBrokenMap = ref<Record<string, boolean>>({});
+function onVideoError(u: string) {
+  videoBrokenMap.value = { ...videoBrokenMap.value, [u]: true };
+}
+
 // 取 URL 中可读的一段用于失败提示（去掉冗长签名参数）
 function shortUrl(u: string): string {
   try {
@@ -530,6 +586,31 @@ function shortUrl(u: string): string {
   } catch {
     return u.length > 40 ? u.slice(0, 40) + '…' : u;
   }
+}
+
+// 从 URL 解析出文件名与类型，用于压缩包/文件卡片展示
+function fileBaseName(u: string): string {
+  let path: string;
+  try {
+    path = new URL(u).pathname;
+  } catch {
+    path = u;
+  }
+  const seg = path.split('/').filter(Boolean).pop() || path;
+  return (seg.split('?')[0] || 'file').split('#')[0] || 'file';
+}
+function fileExtLabel(u: string): string {
+  const name = fileBaseName(u).toLowerCase();
+  const ext = name.includes('.') ? name.split('.').pop()! : '';
+  const map: Record<string, string> = {
+    zip: 'ZIP 压缩包', rar: 'RAR 压缩包', '7z': '7Z 压缩包',
+    gz: 'GZIP 压缩包', tgz: 'TAR.GZ 归档', tar: 'TAR 归档',
+  };
+  return map[ext] || (ext ? ext.toUpperCase() + ' 文件' : '文件');
+}
+function fileKindClass(u: string): string {
+  const ext = fileBaseName(u).toLowerCase().split('.').pop() || 'file';
+  return 'is-' + ext;
 }
 
 // 工具调用参数/结果：尽量美化 JSON，解析失败则原样显示
@@ -662,6 +743,48 @@ watch(
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* ===== 助手消息内联视频（mp4 等直链，内联播放） ===== */
+.msg-video {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 10px;
+  margin: 6px 0;
+  background: #000;
+  border: 1px solid #333;
+}
+
+/* ===== 压缩包 / 文件卡片（替代丑蓝链） ===== */
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  padding: 10px 12px;
+  border: 1px solid #333;
+  border-radius: 10px;
+  background: #161616;
+  max-width: 100%;
+}
+.file-card:hover { border-color: #555; background: #1c1c1c; }
+.file-icon { font-size: 22px; flex-shrink: 0; line-height: 1; }
+.file-meta { flex: 1; min-width: 0; }
+.file-name {
+  font-size: 13px; color: #ddd; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-type {
+  font-size: 11px; color: #888; margin-top: 2px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.file-download {
+  flex-shrink: 0;
+  padding: 5px 12px; border-radius: 8px;
+  background: #2a2a2a; border: 1px solid #444; color: #ccc;
+  font-size: 12px; text-decoration: none;
+}
+.file-download:hover { background: #333; color: #fff; border-color: #666; }
 
 /* ===== 图片灯箱 ===== */
 .lightbox {
