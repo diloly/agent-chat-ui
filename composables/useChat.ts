@@ -6,8 +6,9 @@ import type { PromptItem } from '~/server/utils/coze';
 // 官方 Coze Web SDK / iframe 的做法：conversation_id 与 session_id 都是
 // 由客户端（SDK/iframe）自己生成的，每次请求带上去；服务端接受并使用。
 // 这里我们也客户端生成：
-//   - session_id：代表「用户这次浏览器会话」，跨多次对话保持稳定（刷新页面才会变）
-//   - conversation_id：代表「一次对话线程」，每次「新对话」重新生成
+//   - session_id：代表「一次对话线程的上下文」。每条新对话都重新生成，
+//     确保 Coze 端不同会话之间上下文互不串号（本地隔离与智能体隔离对齐）。
+//   - conversation_id：代表「一次对话线程」的标识，每次「新对话」重新生成，并作为本地存储的 key。
 // 工具调用（对应官方 iframe 里可展开的那张卡）
 // 官方协议里工具消息的 type 取值（见 @coze/api 的 MessageType）：
 //   function_call  / tool_request  —— 调用请求（含工具名 + 入参）
@@ -26,6 +27,14 @@ export interface Msg {
   text?: string;
   attachments?: PromptItem[];   // 用户消息可带附件（图片/文件），按 DOM 顺序
   toolCalls?: ToolCall[];       // 助手消息包含的工具调用（与回答共享同一个头像）
+}
+
+// 会话记录（持久化 conversation_id + session_id + 完整 messages，本地刷新后回显用）
+export interface SessionMeta {
+  conversation_id: string;
+  session_id: string;
+  updatedAt: number;
+  messages?: Msg[];
 }
 
 /**
@@ -120,22 +129,74 @@ export function extractToolCall(parsed: any): ToolCall | null {
   return { id, name, result, status: 'response', _open: false };
 }
 
-// 生成 Coze 风格的会话 ID（任意唯一串服务端都接受；这里用 UUID 保证唯一）
+// 生成 Coze 风格的会话 ID（任意唯一串服务端都接受）。
+// 注意：crypto.randomUUID 仅在「安全上下文」可用（localhost / https）。
+// 局域网用 http://IP 访问时不是安全上下文，randomUUID 可能不存在，调用会抛错，
+// 导致 send()/reset() 在生成 ID 阶段就崩溃（表现为：无法发送、conversation_id/session_id 恒为空）。
+// 故必须做降级：非安全上下文下改用「时间戳 + 随机串」，同样全局唯一、足够做会话标识。
 function genId(): string {
-  return crypto.randomUUID();
+  const g: any = typeof globalThis !== 'undefined' ? globalThis : {};
+  const cryptoObj: any = g.crypto || (typeof window !== 'undefined' ? (window as any).crypto : undefined);
+  if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+    return cryptoObj.randomUUID();
+  }
+  return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
 
 export function useChat() {
   const messages = useState<Msg[]>('messages', () => []);
   const streaming = useState<boolean>('streaming', () => false);
-  // 会话连续性（仅内存，随页面刷新清空；不做记录）
+  // 会话连续性：conversation_id / session_id 由客户端生成，持久化到服务端 JSON（server/data/sessions.json）
   const conversationId = useState<string | null>('conversationId', () => null);
   const sessionId = useState<string | null>('sessionId', () => null);
 
+  // 会话记录列表（从服务端 JSON 读取，含 conversation_id + session_id + 完整 messages，用于左侧列表与回显）
+  const sessions = useState<SessionMeta[]>('sessions', () => []);
+
+  async function loadSessions() {
+    try {
+      const res = await fetch('/api/sessions');
+      if (res.ok) sessions.value = await res.json();
+    } catch {
+      /* 列表加载失败不影响对话 */
+    }
+  }
+
+  // 把当前 conversation_id + session_id + 完整 messages 落盘（messages 用于刷新后回显）
+  async function persistSession() {
+    if (!conversationId.value || !sessionId.value) return;
+    try {
+      await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversation_id: conversationId.value,
+          session_id: sessionId.value,
+          messages: messages.value,
+        }),
+      });
+      await loadSessions();
+    } catch {
+      /* 持久化失败不影响对话 */
+    }
+  }
+
+  // 切换到某个已存在会话：恢复上下文，并把持久化的完整 messages 回显到主聊天区
+  function openSession(cid: string, sid: string) {
+    conversationId.value = cid;
+    sessionId.value = sid;
+    const rec = sessions.value.find((s) => s.conversation_id === cid);
+    messages.value = rec?.messages ? (JSON.parse(JSON.stringify(rec.messages)) as Msg[]) : [];
+  }
+
   function reset() {
     messages.value = [];
-    // 新对话 = 新的 conversation_id；session_id 保持不变（同一用户会话）
+    // 新对话 = 全新的 conversation_id 与 session_id：
+    // session_id 也一并重新生成，Coze 端才会把这条新会话当成独立上下文；
+    // 否则所有会话共用旧 session_id，智能体会把历史对话串进来（本地隔离但智能体不隔离）。
     conversationId.value = genId();
+    sessionId.value = genId();
+    void persistSession();
   }
 
   async function send(items: PromptItem[]) {
@@ -143,6 +204,7 @@ export function useChat() {
     // 首次发送时确保两个 ID 都已生成（客户端生成，符合官方 iframe 行为）
     if (!sessionId.value) sessionId.value = genId();
     if (!conversationId.value) conversationId.value = genId();
+    void persistSession();
 
     const text = items.filter((i) => i.kind === 'text').map((i) => (i as any).text).join('\n');
     messages.value = [...messages.value, { role: 'user', text, attachments: items.filter((i) => i.kind !== 'text') }];
@@ -334,8 +396,25 @@ export function useChat() {
         msgs.pop();
         messages.value = msgs;
       }
+      // 一轮回复结束，把完整对话落盘（含本次 user + assistant 文本/工具卡），刷新后可回显
+      void persistSession();
     }
   }
 
-  return { messages, streaming, conversationId, sessionId, reset, send };
+  // 删除一个会话记录（从服务端 JSON 与本地列表移除）；若删的是当前会话，则回到空白新对话
+  async function deleteSession(cid: string) {
+    try {
+      await fetch('/api/sessions?conversation_id=' + encodeURIComponent(cid), {
+        method: 'DELETE',
+      });
+    } catch {
+      /* 删除失败不影响 */
+    }
+    sessions.value = sessions.value.filter((s) => s.conversation_id !== cid);
+    if (conversationId.value === cid) {
+      reset();
+    }
+  }
+
+  return { messages, streaming, conversationId, sessionId, sessions, loadSessions, openSession, reset, send, deleteSession };
 }

@@ -23,8 +23,8 @@
         <div class="bot-avatar-lg">
           <span class="bot-emoji-lg">🤖</span>
         </div>
-        <div class="bot-name">口播视频智能体</div>
-        <div class="bot-desc">AI口播文案生成智能体，支持封面、脚本生成及视频制作，API 整合外部服务，自动任务识别与子任务划分。</div>
+        <div class="bot-name">灯光展示视频智能体</div>
+        <div class="bot-desc">灯光展示视频智能体，支持封面、脚本生成及视频制作，API整合外部服务，自动任务识别与子任务划分。</div>
       </div>
 
       <!-- 消息列表 -->
@@ -623,7 +623,11 @@ function formatJson(s: string | null | undefined): string {
   }
 }
 
-// 自动滚动到底部
+// 自动滚动到底部。
+// 注意：这里**不能**用 deep 监听——useChat 里所有真实的消息更新（流式字符追加、工具调用、
+// 用户消息、打开会话）都是重新赋值 `messages.value = 新数组`，会触发本 watch；
+// 而点击工具卡展开/收起只是原地切换嵌套的 `tool._open`，不重新赋值 `.value`，
+// 因此不会触发，从而避免「点开工具卡把页面顶到底部」的误滚动。
 watch(
   messages,
   async () => {
@@ -631,8 +635,7 @@ watch(
     if (messagesEl.value) {
       messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' });
     }
-  },
-  { deep: true }
+  }
 );
 </script>
 
@@ -642,7 +645,9 @@ watch(
   display: flex;
   justify-content: center;
   align-items: stretch;
-  height: 100vh;                 /* 固定视口高度，给卡片一个可约束的上限，否则内容会撑高整页 */
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;                  /* 在 flex 两栏布局中填满右侧剩余高度 */
   padding: 28px 20px;
   background: #121212;
   box-sizing: border-box;

@@ -1,10 +1,12 @@
 <template>
   <div class="app">
+    <SessionList />
     <ChatPanel />
   </div>
 </template>
 
 <script setup lang="ts">
+import SessionList from '~/components/SessionList.vue';
 import ChatPanel from '~/components/ChatPanel.vue';
 </script>
 
@@ -20,5 +22,7 @@ body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  display: flex;
+  flex-direction: row;
 }
 </style>

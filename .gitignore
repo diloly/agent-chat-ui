@@ -3,4 +3,5 @@ dist
 .output
 .nuxt
 .data
+server/data
 .env
